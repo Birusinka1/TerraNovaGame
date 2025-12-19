@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Terra Nova Online</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { background: #050505; margin: 0; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; color: #eee; font-family: monospace; user-select: none; -webkit-user-select: none; touch-action: none; }
+        canvas { image-rendering: pixelated; image-rendering: crisp-edges; box-shadow: 0 0 50px rgba(0,0,0,0.8); border: 2px solid #333; background: #111; cursor: crosshair; }
+        #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 4px; border: 1px solid #444; }
+        .res { display: inline-block; width: 10px; height: 10px; margin-right: 5px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div>ONLINE: <span id="online-count">0</span></div>
+        <hr style="border:0; border-top:1px solid #555; margin:5px 0;">
+        <div style="color:#a1887f"><span class="res" style="background:#8d6e63"></span>Дерево: <span id="wood">0</span></div>
+        <div style="color:#b0bec5"><span class="res" style="background:#78909c"></span>Камень: <span id="stone">0</span></div>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+<script>
+    const socket = io(); 
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const GAME_WIDTH = 320; const GAME_HEIGHT = 180; const TILE_SIZE = 16; const WORLD_SIZE = 800;
+    let currentScale = 1; let myId = null; let players = {}; let world = {};
+
+    function resize() {
+        let scaleX = window.innerWidth / GAME_WIDTH; let scaleY = window.innerHeight / GAME_HEIGHT;
+        currentScale = Math.floor(Math.min(scaleX, scaleY)); if (currentScale < 1) currentScale = 1;
+        canvas.width = GAME_WIDTH; canvas.height = GAME_HEIGHT;
+        canvas.style.width = `${GAME_WIDTH * currentScale}px`; canvas.style.height = `${GAME_HEIGHT * currentScale}px`;
+        ctx.imageSmoothingEnabled = false;
+    }
+    window.addEventListener('resize', resize); resize();
+
+    socket.on('connect', () => { myId = socket.id; });
+    socket.on('currentWorld', (w) => { world = w; });
+    socket.on('currentPlayers', (p) => { players = p; updateOnline(); });
+    socket.on('newPlayer', (d) => { players[d.id] = d.player; updateOnline(); });
+    socket.on('playerMoved', (d) => { if(players[d.id]) Object.assign(players[d.id], d); });
+    socket.on('playerDisconnected', (id) => { delete players[id]; updateOnline(); });
+    socket.on('objectHit', (d) => { if(world[d.key]) world[d.key].hitTimer = 5; });
+    socket.on('objectDestroyed', (k) => { delete world[k]; });
+    socket.on('objectCreated', (d) => { world[d.key] = d.obj; });
+    socket.on('updateInventory', (inv) => { document.getElementById('wood').innerText = inv.wood; document.getElementById('stone').innerText = inv.stone; });
+    function updateOnline() { document.getElementById('online-count').innerText = Object.keys(players).length; }
+
+    const keys = { w:0, a:0, s:0, d:0, shift:0 };
+    let mouseX = 0, mouseY = 0;
+    window.addEventListener('keydown', e => { if(e.code==='KeyW')keys.w=1; if(e.code==='KeyA')keys.a=1; if(e.code==='KeyS')keys.s=1; if(e.code==='KeyD')keys.d=1; if(e.code.startsWith('Shift'))keys.shift=1; });
+    window.addEventListener('keyup', e => { if(e.code==='KeyW')keys.w=0; if(e.code==='KeyA')keys.a=0; if(e.code==='KeyS')keys.s=0; if(e.code==='KeyD')keys.d=0; if(e.code.startsWith('Shift'))keys.shift=0; });
+
+    const updateMouse = (cX, cY) => {
+        const rect = canvas.getBoundingClientRect();
+        mouseX = (cX - rect.left) / currentScale; mouseY = (cY - rect.top) / currentScale;
+    };
+    window.addEventListener('mousemove', e => updateMouse(e.clientX, e.clientY));
+    window.addEventListener('mousedown', () => interact());
+    canvas.addEventListener('touchstart', e => { e.preventDefault(); updateMouse(e.touches[0].clientX, e.touches[0].clientY); interact(); }, {passive: false});
+
+    function interact() {
+        if (!myId || !players[myId]) return;
+        let me = players[myId];
+        let camX = Math.floor(me.x - GAME_WIDTH / 2); if(camX<0)camX=0; if(camX>WORLD_SIZE-GAME_WIDTH)camX=WORLD_SIZE-GAME_WIDTH;
+        let camY = Math.floor(me.y - GAME_HEIGHT / 2); if(camY<0)camY=0; if(camY>WORLD_SIZE-GAME_HEIGHT)camY=WORLD_SIZE-GAME_HEIGHT;
+        let wmX = mouseX + camX, wmY = mouseY + camY;
+        let gx = Math.floor(wmX / TILE_SIZE), gy = Math.floor(wmY / TILE_SIZE);
+        let dist = Math.sqrt(Math.pow(wmX - me.x, 2) + Math.pow(wmY - me.y, 2));
+        if (dist < 60) socket.emit('interact', { gx, gy, type: 'build' });
+    }
+
+    function update() {
+        if (!myId || !players[myId]) return;
+        let me = players[myId];
+        let dx=0, dy=0; if(keys.w)dy=-1; if(keys.s)dy=1; if(keys.a)dx=-1; if(keys.d)dx=1;
+        let moving = (dx!==0 || dy!==0);
+        if (moving) {
+            const len = Math.sqrt(dx*dx + dy*dy);
+            let speed = keys.shift ? 2.0 : 1.0;
+            me.x += (dx/len)*speed; me.y += (dy/len)*speed;
+            if(me.x<10)me.x=10; if(me.x>WORLD_SIZE-10)me.x=WORLD_SIZE-10;
+            if(me.y<10)me.y=10; if(me.y>WORLD_SIZE-10)me.y=WORLD_SIZE-10;
+            if(dx>0)me.direction=1; if(dx<0)me.direction=-1;
+            socket.emit('playerMove', {x:me.x, y:me.y, direction:me.direction, moving:true});
+        } else if(me.moving) {
+            me.moving = false; socket.emit('playerMove', {x:me.x, y:me.y, direction:me.direction, moving:false});
+        }
+    }
+
+    function draw() {
+        ctx.fillStyle="#111"; ctx.fillRect(0,0,canvas.width,canvas.height);
+        if (!myId || !players[myId]) return requestAnimationFrame(draw);
+        let me = players[myId];
+        let camX = Math.floor(me.x - GAME_WIDTH / 2); if(camX<0)camX=0; if(camX>WORLD_SIZE-GAME_WIDTH)camX=WORLD_SIZE-GAME_WIDTH;
+        let camY = Math.floor(me.y - GAME_HEIGHT / 2); if(camY<0)camY=0; if(camY>WORLD_SIZE-GAME_HEIGHT)camY=WORLD_SIZE-GAME_HEIGHT;
+        ctx.save(); ctx.translate(-camX, -camY);
+        let sC = Math.floor(camX/TILE_SIZE), eC = sC + 22, sR = Math.floor(camY/TILE_SIZE), eR = sR + 13;
+        for(let y=sR; y<eR; y++) for(let x=sC; x<eC; x++) if(x>=0 && x<50 && y>=0 && y<50) { ctx.fillStyle=((x+y)%2===0)?"#2e7d32":"#388e3c"; ctx.fillRect(x*TILE_SIZE,y*TILE_SIZE,TILE_SIZE,TILE_SIZE); }
+        for(let k in world) {
+            let [gx,gy]=k.split('_'); let px=gx*TILE_SIZE, py=gy*TILE_SIZE; let o=world[k];
+            let sh=(o.hitTimer>0)?(Math.random()-0.5)*4:0; if(o.hitTimer>0)o.hitTimer--;
+            if(o.type==='tree'){ctx.fillStyle="#5d4037";ctx.fillRect(px+6+sh,py+8,4,8);ctx.fillStyle="#2e7d32";ctx.fillRect(px+2+sh,py+2,12,10);}
+            else if(o.type==='rock'){ctx.fillStyle="#78909c";ctx.fillRect(px+2+sh,py+4,12,10);}
+            else if(o.type==='wall'){ctx.fillStyle="#8d6e63";ctx.fillRect(px+sh,py,16,16);}
+        }
+        for(let id in players) {
+            let p=players[id]; let dx=Math.floor(p.x), dy=Math.floor(p.y);
+            ctx.save(); ctx.translate(dx, dy); if(id===myId){ctx.fillStyle="#FFD700";ctx.beginPath();ctx.moveTo(0,-12);ctx.lineTo(-3,-16);ctx.lineTo(3,-16);ctx.fill();}
+            ctx.scale(p.direction,1); ctx.translate(0,-7+(p.moving&&Date.now()%200>100?-1:0));
+            ctx.fillStyle="rgba(0,0,0,0.3)";ctx.fillRect(-3,1,6,2); ctx.fillStyle=id===myId?"#1976d2":"#c62828";ctx.fillRect(-3,0,6,6);
+            ctx.fillStyle="#ffcc80";ctx.fillRect(-3,-5,6,5); ctx.fillStyle="#3e2723";ctx.fillRect(-4,-6,8,1); ctx.fillStyle="#263238";ctx.fillRect(-2,6,1,2);ctx.fillRect(1,6,1,2);
+            ctx.restore();
+        }
+        let wmX=mouseX+camX, wmY=mouseY+camY, gx=Math.floor(wmX/TILE_SIZE), gy=Math.floor(wmY/TILE_SIZE);
+        ctx.strokeStyle="rgba(255,255,255,0.5)"; ctx.lineWidth=1; ctx.strokeRect(gx*TILE_SIZE,gy*TILE_SIZE,TILE_SIZE,TILE_SIZE);
+        ctx.restore(); requestAnimationFrame(draw);
+    }
+    setInterval(update, 1000/60); draw();
+</script>
+</body>
+</html>
